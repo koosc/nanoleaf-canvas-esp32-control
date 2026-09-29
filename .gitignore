@@ -1,0 +1,8 @@
+.pio/
+.esphome/
+__pycache__/
+*.py[cod]
+*$py.class
+*.bin
+webcam_*.jpg
+.DS_Store
