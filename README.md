@@ -1,119 +1,145 @@
-# LeafBus
+# Nanoleaf Canvas ESP32 Controller & ESPHome Integration
 
-Drive Nanoleaf Shapes light panels directly over their panel bus — no stock controller, no cloud, no app.
+Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)** modular square light tiles directly over their 1 Mbaud single-wire UART panel bus — replacing the stock controller with complete local control, zero cloud dependencies, native Home Assistant integration, and an embedded interactive 2D placement web UI.
 
-![Computed layout of a 14-panel assembly](docs/layout-example.svg)
+---
 
-*Layout computed from the bus alone: numbers are chunk indices, dots mark the connector each panel is reached through (
-green: where the ESP32 is attached), the blue ring is the power supply.*
+## Features
 
-An ESP32 replaces the Shapes controller on the three-pin edge connector, enumerates the panels, reads their layout and
-pushes color frames at up to
-~16 frames per second from MicroPython. The assembly then appears on the network as a pixel sink for DDP and E1.31/sACN,
-so any lighting software — xLights, LedFx, Hyperion, WLED sync, a few lines of Python — can play on it. The protocol
-itself is documented in [`PROTOCOL.md`](PROTOCOL.md); this repository is its **reference implementation**: written for
-correctness and readability, not for speed. The frame rate is the interpreter's limit, not the bus's: a C implementation
-runs the same bus at 40 frames per second.
+- **Direct Hardware Bus Control**: Replaces the stock Nanoleaf Canvas master controller using an ESP32-C3 via a single GPIO pin configured for 1 Mbaud open-drain UART.
+- **Cluster Enumeration & 2D Layout Geometry**: Automatic tree discovery and 2D Cartesian coordinate decoding of all attached tiles directly from the bus layout string.
+- **Native Home Assistant Integration**: Exposes an ESPHome Light entity with state synchronization, RGB color picker, brightness slider, and instant transitions.
+- **Embedded Web UI & Placement Visualizer**:
+  - Hosted directly on the ESP32 (port 80).
+  - Dynamically renders an SVG floorplan of the physical tile arrangement.
+  - Interactive per-tile color picker and state preview.
+  - Global color presets, brightness control, and dynamic effects (e.g., flowing rainbow wave, static rainbow).
+- **Dual-Stack Color Protocol**: Supports both legacy global/addressed color frames (`FC 06` / `F8 id 06`) and reverse-chunk bulk push frames (`E0 03`), ensuring compatibility across Canvas firmware revisions.
+- **Robust Bus Health & Hot-Plug Recovery**: 50 ms bulk status polling (`0xC0`), touch reporting (`FC 07`), and automatic re-enumeration on hot-swap events (`0xCC`).
+- **Live Diagnostics API**: Endpoints to inspect bus echo integrity, cluster topology, transaction counts, and raw poll replies.
 
-## Status
+---
 
-| feature                                                        | status                                          |
-|----------------------------------------------------------------|-------------------------------------------------|
-| enumeration, layout string, tree, chunk order                  | ✅                                              |
-| panel coordinates and orientation from the layout string alone | ✅ Mini Triangle and Triangle; Hexagon untested |
-| color per panel (RGBW + transition time), brightness           | ✅                                              |
-| touch events, hot-plug detection and re-enumeration            | ✅                                              |
-| DDP and E1.31 receivers, HTTP topology server                  | ✅ E1.31 unicast and multicast                  |
-| power supply location                                          | ✅ read from the layout string                  |
-| Elements, Lines, Canvas, Hexagon on hardware                   | ❌ not tested                                   |
-| panel firmware update                                          | ❌ out of scope                                 |
+## Hardware & Wiring
 
-## The protocol
+### Requirements
+- **Nanoleaf Canvas Tiles (NL29)** with their standard 24V power supply.
+- **ESP32-C3** (or standard ESP32).
+- **Canvas Linker Board**: Used to connect the ESP32 to an edge connector on any Canvas tile.
 
-**[`PROTOCOL.md`](PROTOCOL.md) is the main result of this project.** It is a self-contained specification — physical
-layer, framing, timing, enumeration, the layout string grammar and the geometry derived from it — with a minimal working
-sequence you can reproduce in an afternoon.
+### Pinout & Wiring
 
-## Hardware
+| ESP32-C3 Pin | Canvas Linker Pad | Function | Notes |
+| :--- | :--- | :--- | :--- |
+| **GPIO4** | **DATA** (Center pad) | 1 Mbaud Bidirectional Bus | Internal pull-up enabled, Open-Drain mode |
+| **GND** | **GND** (Outer pad) | Ground Reference | Common ground with power supply |
+| *Do not connect* | **V+ (24V)** | Tile Power Supply | **WARNING**: Canvas operates at 24V! Do NOT connect directly to ESP32 3.3V/5V! |
 
-- Nanoleaf Shapes panels with their own power supply (42 V). Verified with 13 Mini Triangles and one Triangle.
-- ESP32 (original, e.g. ESP32-D0WD; the S2/S3/C3 need a different GPIO register base, see `firmware/panelbus.py`).
-- One resistor, 1–2 kΩ.
-- Something to reach the panel's DATA and GND pads: a spare linker with wires soldered on, or pogo pins.
+> [!WARNING]
+> The Canvas power rail carries **24 V DC**. Only connect **DATA** and **GND** between the ESP32 and the tile linker. Power the ESP32 separately via USB (or via a step-down buck converter from the 24V rail).
 
-![Wiring](docs/wiring.svg)
+---
 
-The supply pad next to DATA carries **42 V**; double-check the pad order before wiring and leave that pad alone.
+## Quick Start (ESPHome)
 
-The TX pin **must** be open drain; a push-pull output holds the line high and the panels can never answer. The firmware
-sets the pad mode itself.
-
-## Quick start
-
-1. Flash [MicroPython](https://micropython.org/download/ESP32_GENERIC/)
-   v1.29 or later onto the ESP32.
-2. `cp firmware/config.example.json firmware/config.json` and fill in your Wi-Fi.
-3. Copy `firmware/*.py` and `config.json` to the board with your usual tool,
-   e.g. [mpremote](https://docs.micropython.org/en/latest/reference/mpremote.html):
-   ```
-   mpremote cp firmware/*.py firmware/config.json :
-   ```
-4. Reset the board. It prints its IP and starts listening:
-   ```
-   panels: 14
-   DDP    udp://192.168.1.42:4048
-   E1.31  udp://192.168.1.42:5568  universe 1  group 239.255.0.1
-   HTTP   http://192.168.1.42/layout
-   ```
-5. Light it up:
-   ```
-   tools/leafbus.py send 192.168.1.42 red
-   tools/leafbus.py layout 192.168.1.42 --json layout.json --svg layout.svg
-   tools/leafbus.py rainbow 192.168.1.42 --layout layout.json
-   ```
-
-The tool needs nothing beyond the standard library for DDP; `--e131` uses the [`sacn`](https://pypi.org/project/sacn/)
-package (`pip install -r requirements.txt`).
-
-`layout` prints the assembly tree, which chunk index belongs to which panel, where the power supply is, and draws the
-picture at the top of this page.
-`identify <ip> N` lights one panel so you can match indices to the wall. With `--layout` the rainbow's hue follows the
-angle around the assembly instead of the chunk index.
-
-From the REPL, without the network:
-
-```python
-import panelbus
-import anim
-
-bus = panelbus.PanelBus()
-bus.enumerate()
-bus.brightness(255)
-bus.set_color(255, 0, 0)  # every panel red
-bus.push_colors([(255, 0, 0), None, (0, 0, 255)])  # per panel; None = unchanged
-
-anim.rainbow(bus)
+### 1. Project Structure
+```text
+.
+├── components/
+│   └── nanoleaf_canvas/          # ESPHome custom external component
+│       ├── __init__.py
+│       ├── canvas_web_page.h     # Embedded responsive HTML/CSS/JS web interface
+│       ├── light.py              # ESPHome Light platform registration
+│       ├── nanoleaf_canvas.cpp   # Core UART driver, cluster parser & API handler
+│       └── nanoleaf_canvas.h
+├── nanoleaf-canvas-chris.yaml    # ESPHome configuration file
+├── CANVAS_PROTOCOL.md            # Reverse-engineered Canvas protocol documentation
+├── PROTOCOL.md                   # Complete protocol specification
+└── README.md
 ```
 
-## Repository
+### 2. Configuration (`nanoleaf-canvas-chris.yaml`)
+```yaml
+esphome:
+  name: nanoleaf-canvas
+  friendly_name: Nanoleaf Canvas
 
-| path               |                                                                                                                                                                                                                                               |
-|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `PROTOCOL.md`      | the protocol specification                                                                                                                                                                                                                    |
-| `firmware/`        | MicroPython for the ESP32: `panelbus.py` bus driver, `geometry.py` layout string → tree and coordinates, `ddp.py` / `e131.py` / `web.py` network receivers, `app.py` + `main.py` application, `anim.py` on-board demos, `config.example.json` |
-| `tools/leafbus.py` | host tool, talks to the board over IP: `layout`, `identify`, `send`, `rainbow`                                                                                                                                                                |
-| `tests/`           | layout string parser and geometry, `python -m pytest`                                                                                                                                                                                         |
-| `docs/`            | diagrams                                                                                                                                                                                                                                      |
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
 
-## Thanks
+external_components:
+  - source:
+      type: local
+      path: components
 
-To [Cptmeme](https://github.com/Cptmeme) for checking `PROTOCOL.md` against their own
-[Nanoleaf-Shapes-controller](https://github.com/Cptmeme/Nanoleaf-Shapes-controller)
+wifi:
+  ssid: "YourSSID"
+  password: "YourPassword"
 
-## Licences
+api:
+ota:
+  platform: esphome
 
-Everything here — firmware, tools, tests, the specification and the diagrams — is licensed under the **MIT license**
-(`LICENSE`). Implementing `PROTOCOL.md` needs no permission and no attribution in your code.
+web_server:
+  port: 80
 
-This is an independent project and is not affiliated with, endorsed by or supported by Nanoleaf. Product names are used
-only to identify the hardware the project is compatible with.
+nanoleaf_canvas:
+  id: canvas_hub
+  data_pin: 4
+
+light:
+  - platform: nanoleaf_canvas
+    name: "Nanoleaf Canvas"
+    id: canvas_light
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 0s
+```
+
+### 3. Compile & Flash
+Compile using Docker or native ESPHome:
+```bash
+docker run --rm -v $(pwd):/config esphome/esphome compile /config/nanoleaf-canvas-chris.yaml
+```
+
+Flash over serial or OTA:
+```bash
+docker run --rm --net=host -v $(pwd):/config esphome/esphome upload --device 192.168.1.106 /config/nanoleaf-canvas-chris.yaml
+```
+
+---
+
+## Embedded Web Interface & REST API
+
+Navigate to `http://<device-ip>/` in any browser to access the interactive controller:
+
+- **Placement Canvas**: Click any individual tile in the SVG diagram to pick and apply a custom color.
+- **All Tiles**: Change master brightness or set a uniform color for all tiles.
+- **Effects**: Trigger built-in dynamic animations like the Flowing Rainbow Wave.
+
+### REST Endpoints
+
+| Endpoint | Method | Parameters | Description |
+| :--- | :--- | :--- | :--- |
+| `/api/tiles` | `GET` | — | Returns JSON array of tiles with Cartesian coordinates (`x`, `y`), rotation, and current RGB color. |
+| `/api/set` | `GET` | `id`, `r`, `g`, `b` | Sets color of a single tile by node ID. |
+| `/api/all` | `GET` | `r`, `g`, `b`, `[bri]` | Sets global color and/or brightness for all tiles. |
+| `/api/effect` | `GET` | `name=wave\|off\|static_rainbow` | Starts or stops a dynamic lighting effect. |
+| `/api/debug` | `GET` | — | Returns hardware bus echo status, enumeration state, poll counts, and raw poll reply bytes. |
+| `/api/re-enumerate` | `GET` | — | Forces a full cluster enumeration (`00` + `80` layout walk). |
+| `/api/reboot` | `GET` | — | Restarts the ESP32. |
+
+---
+
+## Protocol Documentation
+
+For in-depth documentation on frame structures, packet timings, enumeration grammar, and reverse-engineered command sets, refer to:
+- [`CANVAS_PROTOCOL.md`](CANVAS_PROTOCOL.md): Nanoleaf Canvas (NL29) protocol notes and command reference.
+- [`PROTOCOL.md`](PROTOCOL.md): Complete technical specification of the Nanoleaf modular panel serial protocol.
+
+---
+
+## License
+
+This project is licensed under the MIT License. Nanoleaf is a trademark of Nanoleaf / NanoGrid Limited. This independent project is not affiliated with or endorsed by Nanoleaf.
