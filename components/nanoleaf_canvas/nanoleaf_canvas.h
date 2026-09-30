@@ -36,6 +36,11 @@ class NanoleafCanvas : public Component {
   void set_global_brightness(uint8_t bri);
   void set_global_color(uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0, uint8_t trans = 1);
   void set_node_color(uint16_t id, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0, uint8_t trans = 1);
+  void set_bulk_push_color(uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0, uint8_t trans = 1);
+  void send_bulk_push_tiles(uint8_t trans = 1);
+  bool test_bus_echo();
+  std::string get_debug_json();
+
   void set_wave_animation(bool enable) { anim_wave_ = enable; }
   bool is_wave_animation() const { return anim_wave_; }
 
@@ -72,6 +77,14 @@ class NanoleafCanvas : public Component {
   uint16_t anim_hue_{0};
   bool anim_wave_{false};
 
+  uint32_t poll_count_{0};
+  uint32_t poll_success_{0};
+  int last_poll_rlen_{0};
+  uint8_t last_poll_reply_[64]{0};
+  int last_layout_rlen_{0};
+  uint8_t last_layout_reply_[64]{0};
+  uint32_t tx_count_{0};
+
   light::LightState *light_state_{nullptr};
   bool in_internal_sync_{false};
 
@@ -93,6 +106,9 @@ class NanoleafCanvasLight : public light::LightOutput {
   }
 
   void write_state(light::LightState *state) override {
+    if (this->parent_->is_in_internal_sync()) {
+      return;
+    }
     float r = 0.0f, g = 0.0f, b = 0.0f;
     state->current_values_as_rgb(&r, &g, &b);
     float brightness = state->current_values.get_brightness();

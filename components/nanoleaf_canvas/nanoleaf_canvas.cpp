@@ -48,7 +48,8 @@ class NanoleafWebHandler : public AsyncWebHandler {
     char url_buf[AsyncWebServerRequest::URL_BUF_SIZE];
     std::string url = std::string(request->url_to(url_buf));
     return (url == "/" || url == "/canvas" || url == "/api/tiles" ||
-            url == "/api/set" || url == "/api/all" || url == "/api/effect");
+            url == "/api/set" || url == "/api/all" || url == "/api/effect" ||
+            url == "/api/debug" || url == "/api/re-enumerate" || url == "/api/reboot");
   }
 
   void handleRequest(AsyncWebServerRequest *request) override {
@@ -57,6 +58,25 @@ class NanoleafWebHandler : public AsyncWebHandler {
 
     if (url == "/" || url == "/canvas") {
       request->send(200, "text/html", CANVAS_HTML);
+      return;
+    }
+
+    if (url == "/api/debug") {
+      std::string debug = this->parent_->get_debug_json();
+      request->send(200, "application/json", debug.c_str());
+      return;
+    }
+
+    if (url == "/api/re-enumerate") {
+      bool ok = this->parent_->enumerate_cluster();
+      request->send(200, "application/json", ok ? "{\"status\":\"ok\"}" : "{\"status\":\"failed\"}");
+      return;
+    }
+
+    if (url == "/api/reboot") {
+      request->send(200, "application/json", "{\"status\":\"rebooting\"}");
+      delay(100);
+      esp_restart();
       return;
     }
 
@@ -177,7 +197,7 @@ void NanoleafCanvas::configure_bus() {
 int NanoleafCanvas::xact(const uint8_t *frame, size_t len, uint8_t *reply_buf, size_t max_reply, int expect, uint32_t timeout_ms) {
   uart_flush_input(NANOLEAF_UART_NUM);
   uart_write_bytes(NANOLEAF_UART_NUM, (const char *)frame, len);
-  uart_wait_tx_done(NANOLEAF_UART_NUM, pdMS_TO_TICKS(10));
+  uart_wait_tx_done(NANOLEAF_UART_NUM, pdMS_TO_TICKS(50));
   if (expect == 0) {
     return 0;
   }
@@ -185,6 +205,7 @@ int NanoleafCanvas::xact(const uint8_t *frame, size_t len, uint8_t *reply_buf, s
   uint32_t start = millis();
   uint8_t rx_raw[1024];
   size_t total_rx = 0;
+  uint32_t last_rx_micros = micros();
 
   while (millis() - start < timeout_ms) {
     size_t available = 0;
@@ -194,7 +215,7 @@ int NanoleafCanvas::xact(const uint8_t *frame, size_t len, uint8_t *reply_buf, s
                               sizeof(rx_raw) - total_rx, 0);
       if (r > 0) {
         total_rx += r;
-        if (expect > 0 && (int)total_rx >= (int)len + expect) break;
+        last_rx_micros = micros();
         if (expect == -1 && total_rx > len) {
           bool found_term = false;
           for (size_t j = len; j < total_rx; j++) {
@@ -207,7 +228,10 @@ int NanoleafCanvas::xact(const uint8_t *frame, size_t len, uint8_t *reply_buf, s
         }
       }
     }
-    esp_rom_delay_us(250);
+    if (expect > 0 && (int)total_rx >= (int)len + expect && (micros() - last_rx_micros > 1500)) {
+      break;
+    }
+    esp_rom_delay_us(100);
   }
 
   size_t reply_len = 0;
@@ -342,6 +366,9 @@ bool NanoleafCanvas::enumerate_cluster() {
     return false;
   }
 
+  this->last_layout_rlen_ = best_rlen;
+  memcpy(this->last_layout_reply_, best_reply, (best_rlen < 64) ? best_rlen : 64);
+
   parse_layout_tree(best_reply, best_rlen);
   this->enumerated_ = true;
 
@@ -378,8 +405,48 @@ void NanoleafCanvas::sync_to_light_state(bool is_on, uint8_t bri, uint8_t r, uin
 
 void NanoleafCanvas::set_global_brightness(uint8_t bri) {
   this->cur_brightness_ = bri;
+  this->tx_count_++;
   const uint8_t bri_cmd[] = {0xFC, 0x04, this->cur_brightness_};
   xact(bri_cmd, sizeof(bri_cmd), NULL, 0, 0, 30);
+}
+
+void NanoleafCanvas::set_bulk_push_color(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t trans) {
+  if (this->n_panels_ == 0) return;
+  this->tx_count_++;
+  // E0 03 followed by n_panels chunks of [05 trans R G B W]
+  uint8_t frame[2 + 256 * 6];
+  frame[0] = 0xE0;
+  frame[1] = 0x03;
+  size_t idx = 2;
+  for (size_t i = 0; i < this->n_panels_; i++) {
+    frame[idx++] = 0x05;
+    frame[idx++] = trans;
+    frame[idx++] = r;
+    frame[idx++] = g;
+    frame[idx++] = b;
+    frame[idx++] = w;
+  }
+  xact(frame, idx, NULL, 0, 0, 50);
+}
+
+void NanoleafCanvas::send_bulk_push_tiles(uint8_t trans) {
+  if (this->tiles_.empty()) return;
+  this->tx_count_++;
+  uint8_t frame[2 + 256 * 6];
+  frame[0] = 0xE0;
+  frame[1] = 0x03;
+  size_t idx = 2;
+  // PROTOCOL.md §5.3: chunk order is reverse of layout string
+  for (int p = (int)this->tiles_.size() - 1; p >= 0; p--) {
+    const auto &t = this->tiles_[p];
+    frame[idx++] = 0x05;
+    frame[idx++] = trans;
+    frame[idx++] = t.r;
+    frame[idx++] = t.g;
+    frame[idx++] = t.b;
+    frame[idx++] = t.w;
+  }
+  xact(frame, idx, NULL, 0, 0, 50);
 }
 
 void NanoleafCanvas::set_global_color(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t trans) {
@@ -388,14 +455,22 @@ void NanoleafCanvas::set_global_color(uint8_t r, uint8_t g, uint8_t b, uint8_t w
   this->cur_b_ = b;
   this->cur_w_ = w;
   this->has_color_ = true;
+  this->tx_count_++;
+
+  // Send FC 06 global color
   const uint8_t frame[] = {0xFC, 0x06, r, g, b, w, trans};
   xact(frame, sizeof(frame), NULL, 0, 0, 30);
+
+  // Also send E0 03 bulk push
+  set_bulk_push_color(r, g, b, w, trans);
+
   for (auto &t : this->tiles_) {
     t.r = r; t.g = g; t.b = b; t.w = w;
   }
 }
 
 void NanoleafCanvas::set_node_color(uint16_t id, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t trans) {
+  this->tx_count_++;
   uint8_t frame[] = {0xF8, (uint8_t)(id & 0xFF), (uint8_t)(id >> 8), 0x06, r, g, b, w, trans};
   xact(frame, sizeof(frame), NULL, 0, 0, 30);
   if (id < this->tiles_.size()) {
@@ -404,15 +479,21 @@ void NanoleafCanvas::set_node_color(uint16_t id, uint8_t r, uint8_t g, uint8_t b
     this->tiles_[id].b = b;
     this->tiles_[id].w = w;
   }
+  send_bulk_push_tiles(trans);
 }
 
 void NanoleafCanvas::poll_bulk() {
+  this->poll_count_++;
   const uint8_t cmd = 0xC0;
   uint8_t reply[256];
-  // Expect 2 bytes per panel, plus 1 trailing byte if hotswap CC occurs
-  int rlen = xact(&cmd, 1, reply, sizeof(reply), this->n_panels_ * 2 + 1, 25);
+  // Expect 2 bytes per panel (2 * n_panels), allow up to 250ms window
+  int rlen = xact(&cmd, 1, reply, sizeof(reply), this->n_panels_ * 2, 250);
+  this->last_poll_rlen_ = rlen;
 
   if (rlen > 0) {
+    this->poll_success_++;
+    memcpy(this->last_poll_reply_, reply, (rlen < 64) ? rlen : 64);
+
     // Process touch status on panel pairs
     for (size_t p = 0; p < this->n_panels_ && (p * 2 + 1) < (size_t)rlen; p++) {
       uint8_t status = reply[p * 2];
@@ -424,16 +505,74 @@ void NanoleafCanvas::poll_bulk() {
       }
     }
 
-    // Check for trailing 0xCC (hot-swap / topology change)
-    if (rlen > (int)(this->n_panels_ * 2) && reply[this->n_panels_ * 2] == 0xCC) {
+    // Check for trailing or lone 0xCC (hot-swap / topology change)
+    bool has_cc = false;
+    for (int i = 0; i < rlen; i++) {
+      if (reply[i] == 0xCC) {
+        has_cc = true;
+        break;
+      }
+    }
+    if (has_cc) {
       uint32_t now = millis();
-      if (now - this->last_re_enum_ms_ >= 10000) {
+      if (now - this->last_re_enum_ms_ >= 5000) {
         this->last_re_enum_ms_ = now;
-        ESP_LOGI(TAG, "Hot-plug detected (trailing 0xCC)! Re-enumerating...");
+        ESP_LOGI(TAG, "Hot-plug detected (0xCC in reply)! Re-enumerating...");
         enumerate_cluster();
       }
     }
   }
+}
+
+bool NanoleafCanvas::test_bus_echo() {
+  const uint8_t pattern[] = {0x55, 0xAA, 0x55, 0xAA, 0x0F, 0xF0};
+  int pass = 0;
+  for (int t = 0; t < 5; t++) {
+    uart_flush_input(NANOLEAF_UART_NUM);
+    uart_write_bytes(NANOLEAF_UART_NUM, (const char *)pattern, sizeof(pattern));
+    uart_wait_tx_done(NANOLEAF_UART_NUM, pdMS_TO_TICKS(20));
+
+    uint8_t rx[16] = {0};
+    int r = uart_read_bytes(NANOLEAF_UART_NUM, rx, sizeof(pattern), pdMS_TO_TICKS(30));
+    if (r == sizeof(pattern) && memcmp(rx, pattern, sizeof(pattern)) == 0) {
+      pass++;
+    }
+    delay(5);
+  }
+  return pass >= 4;
+}
+
+std::string NanoleafCanvas::get_debug_json() {
+  bool echo_ok = test_bus_echo();
+  std::stringstream ss;
+  ss << "{"
+     << "\"bus_echo\":" << (echo_ok ? "true" : "false")
+     << ",\"enumerated\":" << (this->enumerated_ ? "true" : "false")
+     << ",\"n_panels\":" << (int)this->n_panels_
+     << ",\"poll_count\":" << this->poll_count_
+     << ",\"poll_success\":" << this->poll_success_
+     << ",\"last_poll_rlen\":" << this->last_poll_rlen_
+     << ",\"tx_count\":" << this->tx_count_
+     << ",\"anim_wave\":" << (this->anim_wave_ ? "true" : "false")
+     << ",\"cur_brightness\":" << (int)this->cur_brightness_
+     << ",\"cur_r\":" << (int)this->cur_r_
+     << ",\"cur_g\":" << (int)this->cur_g_
+     << ",\"cur_b\":" << (int)this->cur_b_
+     << ",\"last_layout_rlen\":" << this->last_layout_rlen_
+     << ",\"last_layout_hex\":\"";
+  for (int i = 0; i < this->last_layout_rlen_ && i < 32; i++) {
+    char h[4];
+    snprintf(h, sizeof(h), "%02X", this->last_layout_reply_[i]);
+    ss << h;
+  }
+  ss << "\",\"last_poll_hex\":\"";
+  for (int i = 0; i < this->last_poll_rlen_ && i < 32; i++) {
+    char h[4];
+    snprintf(h, sizeof(h), "%02X", this->last_poll_reply_[i]);
+    ss << h;
+  }
+  ss << "\"}";
+  return ss.str();
 }
 
 
@@ -488,8 +627,8 @@ void NanoleafCanvas::loop() {
 
   // 50ms periodic bulk poll
   if (this->enumerated_ && (now - this->last_poll_ms_ >= 50)) {
-    this->last_poll_ms_ = now;
     poll_bulk();
+    this->last_poll_ms_ = millis();
   }
 }
 
