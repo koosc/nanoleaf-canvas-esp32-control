@@ -140,6 +140,17 @@ For in-depth documentation on frame structures, packet timings, enumeration gram
 
 ---
 
+## Credits & Prior Work
+
+This project builds upon the foundational reverse-engineering work and documentation shared by the community:
+
+- **Christian Panton**: For the pioneering analysis and deep-dive blog post on reverse engineering the Nanoleaf panel communication bus:
+  - [**Nanoleaf Shapes deepdive, part 1: Reverse engineering the protocol**](https://christian.panton.org/posts/nanoleaf-ctrl-pt1/)
+- **[LeafBus by MyrikLD](https://github.com/MyrikLD/LeafBus)**: For the comprehensive [`PROTOCOL.md`](PROTOCOL.md) technical specification documenting the serial physical layer, packet framing, and layout tree grammar.
+- **[Cptmeme's Nanoleaf-Shapes-controller](https://github.com/Cptmeme/Nanoleaf-Shapes-controller)**: For invaluable observations on layout chunk ordering, hot-plug markers, and bus timing.
+
+---
+
 ## License
 
 This project is licensed under the MIT License. Nanoleaf is a trademark of Nanoleaf / NanoGrid Limited. This independent project is not affiliated with or endorsed by Nanoleaf.
