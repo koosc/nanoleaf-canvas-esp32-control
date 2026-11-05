@@ -6,17 +6,18 @@ Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)*
 
 ## Features
 
-- **Direct Hardware Bus Control**: Replaces the stock Nanoleaf Canvas master controller using an ESP32-C3 via a single GPIO pin configured for 1 Mbaud open-drain UART.
+- **Direct Hardware Bus Control**: Replaces the stock Nanoleaf Canvas master controller using an ESP32-C3 via a single GPIO pin running a 1 Mbaud half-duplex UART (open drain, actively driven while transmitting).
 - **Cluster Enumeration & 2D Layout Geometry**: Automatic tree discovery and 2D Cartesian coordinate decoding of all attached tiles directly from the bus layout string.
-- **Native Home Assistant Integration**: Exposes an ESPHome Light entity with state synchronization, RGB color picker, brightness slider, and instant transitions.
+- **Native Home Assistant Integration**: Exposes an ESPHome Light entity with state synchronization, RGB color picker, brightness slider, transitions, and the "Rainbow Wave" / "Static Rainbow" effects. Per-tile colors set from the web UI survive dimming.
 - **Embedded Web UI & Placement Visualizer**:
   - Hosted directly on the ESP32 (port 80).
-  - Dynamically renders an SVG floorplan of the physical tile arrangement.
+  - Dynamically renders an SVG floorplan of the physical tile arrangement (with a "Rotate view" link, since the layout string does not tell which way the first panel faces).
   - Interactive per-tile color picker and state preview.
   - Global color presets, brightness control, and dynamic effects (e.g., flowing rainbow wave, static rainbow).
-- **Dual-Stack Color Protocol**: Supports both legacy global/addressed color frames (`FC 06` / `F8 id 06`) and reverse-chunk bulk push frames (`E0 03`), ensuring compatibility across Canvas firmware revisions.
-- **Robust Bus Health & Hot-Plug Recovery**: 50 ms bulk status polling (`0xC0`), touch reporting (`FC 07`), and automatic re-enumeration on hot-swap events (`0xCC`).
-- **Live Diagnostics API**: Endpoints to inspect bus echo integrity, cluster topology, transaction counts, and raw poll replies.
+- **Canvas Color Protocol**: Global color (`FC 06`) when all tiles match, one addressed frame per tile (`F8 id 06`) otherwise, and global brightness (`FC 04`). The Shapes bulk push (`E0 03`) is not used: Canvas panels ignore it.
+- **Robust Bus Health & Hot-Plug Recovery**: 50 ms bulk status polling (`0xC0`), touch reporting (`FC 07`), re-enumeration within 250 ms of a hot-plug marker (`0xCC`) or when the panels stop answering, and a periodic resend of the full state (SET frames have no acknowledgement).
+- **Thread-Safe Bus Access**: Web requests are executed on the ESPHome main loop, so they never interleave with polling or Home Assistant commands on the bus.
+- **Live Diagnostics API**: Endpoints to inspect enumeration, poll/echo/hot-plug counters, raw poll replies, and to send raw frames for protocol experiments.
 
 ---
 
@@ -31,9 +32,15 @@ Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)*
 
 | ESP32-C3 Pin | Canvas Linker Pad | Function | Notes |
 | :--- | :--- | :--- | :--- |
-| **GPIO4** | **DATA** (Center pad) | 1 Mbaud Bidirectional Bus | Internal pull-up enabled, Open-Drain mode |
+| **GPIO4** | **DATA** (Center pad) | 1 Mbaud Bidirectional Bus | Open-drain; actively driven while transmitting (`push_pull_tx`). A 1–2.2 kΩ pull-up from DATA to 3.3 V is recommended |
 | **GND** | **GND** (Outer pad) | Ground Reference | Common ground with power supply |
 | *Do not connect* | **V+ (24V)** | Tile Power Supply | **WARNING**: Canvas operates at 24V! Do NOT connect directly to ESP32 3.3V/5V! |
+
+> [!NOTE]
+> The internal ~45 kΩ pull-up alone gives rising edges too slow for 1 Mbaud: with pure open-drain,
+> panels missed about one frame in five. The firmware therefore drives the line push-pull while it
+> sends frames that have no reply, and releases it right after the stop bit. An external 1–2.2 kΩ
+> pull-up to 3.3 V further improves the panels' replies and is what the LeafBus reference build uses.
 
 > [!WARNING]
 > The Canvas power rail carries **24 V DC**. Only connect **DATA** and **GND** between the ESP32 and the tile linker. Power the ESP32 separately via USB (or via a step-down buck converter from the 24V rail).
@@ -54,7 +61,10 @@ Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)*
 │       └── nanoleaf_canvas.h
 ├── nanoleaf-canvas-chris.yaml    # ESPHome configuration file
 ├── CANVAS_PROTOCOL.md            # Reverse-engineered Canvas protocol documentation
-├── PROTOCOL.md                   # Complete protocol specification
+├── PROTOCOL.md                   # LeafBus specification of the Nanoleaf Shapes bus
+├── cptmeme-protocol-notes.md     # Cptmeme's additional Shapes bus observations
+├── panelbus.py                   # LeafBus MicroPython bus master (Shapes reference)
+├── src/main.cpp, platformio.ini  # Early standalone Arduino/PlatformIO prototype (not maintained)
 └── README.md
 ```
 
@@ -88,6 +98,7 @@ web_server:
 nanoleaf_canvas:
   id: canvas_hub
   data_pin: 4
+  # push_pull_tx: true   # drive the line while transmitting (default); see wiring note
 
 light:
   - platform: nanoleaf_canvas
@@ -98,14 +109,30 @@ light:
 ```
 
 ### 3. Compile & Flash
-Compile using Docker or native ESPHome:
+Compile with native ESPHome (e.g. installed in a virtualenv) or Docker:
 ```bash
+esphome compile nanoleaf-canvas-chris.yaml
+# or
 docker run --rm -v $(pwd):/config esphome/esphome compile /config/nanoleaf-canvas-chris.yaml
 ```
 
 Flash over serial or OTA:
 ```bash
+esphome upload --device 192.168.1.106 nanoleaf-canvas-chris.yaml
+# or
 docker run --rm --net=host -v $(pwd):/config esphome/esphome upload --device 192.168.1.106 /config/nanoleaf-canvas-chris.yaml
+```
+
+Check that the compile step succeeded before uploading; `upload` flashes whatever binary was last built.
+
+### 4. Brightness Curve
+Brightness is sent through the panels' own brightness command (`FC 04`) after the light's gamma correction (ESPHome default `gamma_correct: 2.8`). The panels respond roughly linearly, so the bottom of the slider is very dim, especially in a lit room. For more usable low levels, set a lower gamma on the light:
+
+```yaml
+light:
+  - platform: nanoleaf_canvas
+    name: "Nanoleaf Canvas"
+    gamma_correct: 2.0
 ```
 
 ---
@@ -114,21 +141,32 @@ docker run --rm --net=host -v $(pwd):/config esphome/esphome upload --device 192
 
 Navigate to `http://<device-ip>/` in any browser to access the interactive controller:
 
-- **Placement Canvas**: Click any individual tile in the SVG diagram to pick and apply a custom color.
-- **All Tiles**: Change master brightness or set a uniform color for all tiles.
-- **Effects**: Trigger built-in dynamic animations like the Flowing Rainbow Wave.
+- **Placement Canvas**: Click any individual tile in the SVG diagram to pick and apply a custom color. Use "Rotate view" to match the map to the wall (stored in the browser).
+- **All Tiles**: Change master brightness or set a uniform color for all tiles. These go through the ESPHome light, so Home Assistant stays in sync.
+- **Effects**: Trigger the Rainbow Wave or Static Rainbow effects (the same effects Home Assistant shows).
 
 ### REST Endpoints
 
 | Endpoint | Method | Parameters | Description |
 | :--- | :--- | :--- | :--- |
 | `/api/tiles` | `GET` | — | Returns JSON array of tiles with Cartesian coordinates (`x`, `y`), rotation, and current RGB color. |
-| `/api/set` | `GET` | `id`, `r`, `g`, `b` | Sets color of a single tile by node ID. |
-| `/api/all` | `GET` | `r`, `g`, `b`, `[bri]` | Sets global color and/or brightness for all tiles. |
-| `/api/effect` | `GET` | `name=wave\|off\|static_rainbow` | Starts or stops a dynamic lighting effect. |
-| `/api/debug` | `GET` | — | Returns hardware bus echo status, enumeration state, poll counts, and raw poll reply bytes. |
+| `/api/set` | `GET` | `id`, `r`, `g`, `b` | Sets the color of a single tile (id = position in the layout, as listed by `/api/tiles`). Turns the light on and stops a running effect if needed. |
+| `/api/all` | `GET` | `r`, `g`, `b`, `[bri]` | Sets color and/or brightness (0–255) for all tiles via the light entity. `bri=0` or black turns the light off. |
+| `/api/effect` | `GET` | `name=wave\|static_rainbow\|none\|off` | Starts an effect (`none` stops it, `off` turns the light off). The same effects ("Rainbow Wave", "Static Rainbow") are exposed to Home Assistant. |
+| `/api/debug` | `GET` | — | Returns enumeration state, poll/echo/hot-plug counters, and raw poll and layout bytes. |
+| `/api/raw` | `GET` | `hex`, `[expect]`, `[timeout]` | Debug: sends raw frames (separate several with `-`) and returns the reply. Pauses the firmware's own color frames for 60 s. |
+| `/api/buscfg` | `GET` | `[pp]`, `[gap]`, `[nopoll]`, `[autoenum]` | Debug: changes bus settings at runtime. |
 | `/api/re-enumerate` | `GET` | — | Forces a full cluster enumeration (`00` + `80` layout walk). |
 | `/api/reboot` | `GET` | — | Restarts the ESP32. |
+
+### Troubleshooting
+
+`/api/debug` counters worth watching:
+
+- `poll_short`: poll replies shorter than 2 bytes per panel; almost always lone `CC` hot-plug markers.
+- `cc_events` / `enum_count`: hot-plug markers and the re-enumerations they triggered. Several per minute without touching anything suggest a marginal DATA/GND connection; reseat the wires and add the 1–2.2 kΩ pull-up.
+- `echo_errors`: frames whose echo did not match what was sent (bus noise or collisions).
+- `silent_events`: the panels stopped answering polls entirely and were re-enumerated.
 
 ---
 
@@ -136,7 +174,7 @@ Navigate to `http://<device-ip>/` in any browser to access the interactive contr
 
 For in-depth documentation on frame structures, packet timings, enumeration grammar, and reverse-engineered command sets, refer to:
 - [`CANVAS_PROTOCOL.md`](CANVAS_PROTOCOL.md): Nanoleaf Canvas (NL29) protocol notes and command reference.
-- [`PROTOCOL.md`](PROTOCOL.md): Complete technical specification of the Nanoleaf modular panel serial protocol.
+- [`PROTOCOL.md`](PROTOCOL.md): LeafBus specification of the Nanoleaf **Shapes** panel bus. Framing, enumeration and the layout grammar apply to Canvas too; color and brightness differ (see `CANVAS_PROTOCOL.md`).
 
 ---
 

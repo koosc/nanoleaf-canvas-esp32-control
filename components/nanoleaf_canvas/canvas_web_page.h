@@ -181,6 +181,7 @@ const char CANVAS_HTML[] = R"rawliteral(<!DOCTYPE html>
       </div>
       <div id="selection-label" style="font-size:0.8rem; color:var(--text-muted); text-align:center;">
         Click any tile above to set its color
+        &middot; <a href="#" onclick="rotateView(); return false;" style="color:var(--primary);">Rotate view</a>
       </div>
     </div>
 
@@ -237,6 +238,21 @@ const char CANVAS_HTML[] = R"rawliteral(<!DOCTYPE html>
     let tiles = [];
     let selectedId = 0; // null = all, number = specific tile
     let isWaveActive = false;
+    // The layout string does not say which way the first panel faces, so let
+    // the user turn the map to match the wall.
+    let rotation = parseInt(localStorage.getItem('canvasRotation') || '0', 10) % 4;
+
+    function rotateView() {
+      rotation = (rotation + 1) % 4;
+      localStorage.setItem('canvasRotation', rotation);
+      renderSvg();
+    }
+
+    function rotated(t) {
+      let x = t.x, y = t.y;
+      for (let i = 0; i < rotation; i++) { const nx = y; y = -x; x = nx; }
+      return { x, y };
+    }
 
     async function loadTiles() {
       try {
@@ -256,10 +272,11 @@ const char CANVAS_HTML[] = R"rawliteral(<!DOCTYPE html>
       
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
       tiles.forEach(t => {
-        if (t.x < minX) minX = t.x;
-        if (t.x > maxX) maxX = t.x;
-        if (t.y < minY) minY = t.y;
-        if (t.y > maxY) maxY = t.y;
+        const p = rotated(t);
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
       });
 
       const TILE_SIZE = 72;
@@ -275,8 +292,9 @@ const char CANVAS_HTML[] = R"rawliteral(<!DOCTYPE html>
 
       let html = '';
       tiles.forEach(t => {
-        const px = (t.x - minX) * SPACING + PADDING;
-        const py = (maxY - t.y) * SPACING + PADDING; // Invert Y for SVG coordinates
+        const p = rotated(t);
+        const px = (p.x - minX) * SPACING + PADDING;
+        const py = (maxY - p.y) * SPACING + PADDING; // Invert Y for SVG coordinates
         const isSel = (selectedId === t.id);
         const fill = `rgb(${t.r}, ${t.g}, ${t.b})`;
 
@@ -365,7 +383,7 @@ const char CANVAS_HTML[] = R"rawliteral(<!DOCTYPE html>
         await fetch('/api/effect?name=wave');
       } else {
         btn.classList.remove('active');
-        await fetch('/api/effect?name=off');
+        await fetch('/api/effect?name=none');
       }
     }
 
