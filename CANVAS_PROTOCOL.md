@@ -15,14 +15,15 @@ The Canvas interconnect system uses 3-pin edge linkers that carry DC power and b
        |                               |
        +-[ 1 ]-------[ 2 ]-------[ 3 ]-+
           |             |           |
-        +24V           GND        DATA (3.3V)
+         GND          +24V        DATA (3.3V)
+       (Left)       (Middle)      (Right)
 ```
 
 | Pin | Designation | Description | Electrical Characteristics |
 |---|---|---|---|
-| **1** | **+24V** | Main DC power rail | 24V DC from power supply (DO NOT connect directly to ESP32!) |
-| **2** | **GND** | System Ground | Common reference ground shared between power supply, panels, and ESP32 |
-| **3** | **DATA** | Bidirectional Data Line | 3.3V logic level, half-duplex single wire, weak onboard pull-up (~120 kΩ to 3.3V) |
+| **1 (Left)** | **GND** | System Ground | Common reference ground shared between power supply, panels, and ESP32 |
+| **2 (Middle)** | **+24V** | Main DC power rail | 24V DC from power supply (DO NOT connect directly to ESP32!) |
+| **3 (Right)** | **DATA** | Bidirectional Data Line | 3.3V logic level, half-duplex single wire, weak onboard pull-up (~120 kΩ to 3.3V) |
 
 ### 1.1 ESP32-C3 Hardware Interface
 Because the data line is a single half-duplex wire where both the controller and panels communicate, the transmitter **must release the line (Hi-Z)** when idle:
@@ -40,9 +41,9 @@ flowchart LR
         GND_ESP["GND"]
     end
     subgraph Nanoleaf Canvas
-        DATA["DATA (Pin 3)"]
-        GND_PANEL["GND (Pin 2)"]
-        V24["+24V (Pin 1)"]
+        GND_PANEL["GND (Pin 1 - Left)"]
+        V24["+24V (Pin 2 - Middle)"]
+        DATA["DATA (Pin 3 - Right)"]
     end
     PSU["24V DC Power Supply"]
 
@@ -104,13 +105,23 @@ flowchart LR
 - **Direction:** Controller → Panels (Broadcast)
 - **Format:** `FC 06 <R> <G> <B> <W> <Transition>` (7 bytes)
 - **Parameters:**
+  - `0xFC`: Global broadcast command opcode
+  - `0x06`: Set color subcommand
   - `<R>`: Red level (`0x00` - `0xFF`)
   - `<G>`: Green level (`0x00` - `0xFF`)
   - `<B>`: Blue level (`0x00` - `0xFF`)
-  - `<W>`: Dedicated White level (`0x00` - `0xFF`)
-  - `<Transition>`: Fade time, presumably in ~100 ms steps (unverified). The firmware sends `0x01` and lets ESPHome drive longer transitions.
+  - `<W>`: Dedicated cool-white phosphor LED level (`0x00` - `0xFF`)
+  - `<Transition>`: Fade time in ~100 ms units (e.g. `0x01` = 100 ms, `0x05` = 500 ms)
 - **Reply:** None.
-- **Notes:** Unlike Shapes, Canvas panels act on `FC 06` and `F8 <id> 06`; the Shapes bulk push `E0 03 …` has **no effect** on Canvas. A frame with `W ≠ 0` is ignored entirely, so always send `W = 0`.
+- **Notes:** Reverse-engineered and verified directly on hardware. Dedicated white LEDs are fully functional via the `W` channel (byte 5). Pure cool white maps to `W = 255, R=G=B=0`. Color temperature maps 1500K–6500K across `(R, G, W)` with `B = 0`. Desaturated RGB colors extract common mode $W = \min(R, G, B)$ to provide vibrant, high-lumen, flicker-free output. Single-panel addressing uses `F8 <id_lo> <id_hi> 06 <R> <G> <B> <W> <Transition>`.
+
+### 3.4.1 Bulk Push Color Streaming (`0xE0 0x00`)
+- **Direction:** Controller → Panels (Multi-hop tree stream)
+- **Format:** `E0 00 <chunk_N-1> ... <chunk_0>` ($2 + 5 \times N$ bytes)
+- **Parameters:**
+  - `0xE0`: Bulk Push opcode
+  - `0x00`: Canvas family subtype (Shapes uses `0x03`)
+  - `<chunk_i>`: 5-byte chunk per panel in **reverse layout-string order**: `05 <R> <G> <B> <W>`. Each panel consumes and strips its chunk as the frame traverses the chain. Used by stock controllers for dynamic scene streaming.
 
 ### 3.5 Touch Reporting Enable (`0xFC 0x07`)
 - **Direction:** Controller → Panels (Broadcast)
@@ -189,8 +200,8 @@ To initialize and control a Nanoleaf Canvas installation:
 4. **Brightness:** Send `FC 04 <brightness>`.
 5. **Enable Touch:** Send `FC 07 01`.
 6. **Set Initial Color:**
-   - Global: `FC 06 R G B 00 T`
-   - Individual: `F8 <id> 00 06 R G B 00 T` for each tile $0 \dots N-1$, one frame per write.
+   - Global: `FC 06 R G B W T`
+   - Individual: `F8 <id> 00 06 R G B W T` for each tile $0 \dots N-1$, one frame per write.
 7. **Continuous Polling:** Schedule `0xC0` every 50 ms. If a reply contains `0xCC`, re-run steps 2–6 right away.
 
 ---
@@ -201,7 +212,7 @@ The ESPHome integration is structured as an external component in `components/na
 
 ### 6.1 Home Assistant Light Entity
 - Platform: `nanoleaf_canvas`
-- Implements `light::LightOutput` with RGB support.
+- Implements `light::LightOutput` with native RGB and Color Temperature (1200K–6500K) support.
 - Full native integration for Home Assistant (power toggle, brightness 0–100%, RGB color wheel, transitions).
 - Brightness is sent once, through `FC 04` (gamma-corrected); colors are sent at full scale, so dimming does not quantize or shift colors.
 - A color change repaints all tiles; a brightness-only change keeps per-tile colors.

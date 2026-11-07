@@ -24,11 +24,13 @@ struct CanvasTile {
   uint8_t r;
   uint8_t g;
   uint8_t b;
+  uint8_t w;
   uint8_t status;
   // Last color actually sent to the panel
   uint8_t sent_r;
   uint8_t sent_g;
   uint8_t sent_b;
+  uint8_t sent_w;
 };
 
 // A unit of work handed from the HTTP server task to the main loop. All bus I/O
@@ -53,8 +55,8 @@ class NanoleafCanvas : public Component {
   // sent from loop() so that bursts of changes coalesce into one bus frame.
   bool enumerate_cluster();
   void set_brightness(uint8_t bri);
-  void set_all_colors(uint8_t r, uint8_t g, uint8_t b);
-  void set_tile_color(size_t index, uint8_t r, uint8_t g, uint8_t b);
+  void set_all_colors(uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0);
+  void set_tile_color(size_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w = 0);
   void set_transition(uint8_t trans) { transition_ = trans; }
   void request_reboot() {
     this->set_timeout(250, []() { App.safe_reboot(); });
@@ -101,7 +103,7 @@ class NanoleafCanvas : public Component {
   // Desired output state
   uint8_t brightness_{0};
   uint8_t transition_{1};
-  uint8_t def_r_{255}, def_g_{255}, def_b_{255};
+  uint8_t def_r_{255}, def_g_{255}, def_b_{255}, def_w_{0};
   bool sent_valid_{false};
   bool bri_dirty_{false};
   bool colors_dirty_{false};
@@ -184,7 +186,7 @@ class NanoleafCanvasLight : public light::LightOutput {
  protected:
   NanoleafCanvas *parent_;
   bool have_last_{false};
-  uint8_t last_r_{0}, last_g_{0}, last_b_{0};
+  uint8_t last_r_{0}, last_g_{0}, last_b_{0}, last_w_{0};
 };
 
 }  // namespace nanoleaf_canvas

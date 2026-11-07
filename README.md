@@ -28,13 +28,13 @@ Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)*
 - **ESP32-C3** (or standard ESP32).
 - **Canvas Linker Board**: Used to connect the ESP32 to an edge connector on any Canvas tile.
 
-### Pinout & Wiring
+### Pinout & Wiring (Looking at Connector)
 
 | ESP32-C3 Pin | Canvas Linker Pad | Function | Notes |
 | :--- | :--- | :--- | :--- |
-| **GPIO4** | **DATA** (Center pad) | 1 Mbaud Bidirectional Bus | Open-drain; actively driven while transmitting (`push_pull_tx`). A 1–2.2 kΩ pull-up from DATA to 3.3 V is recommended |
-| **GND** | **GND** (Outer pad) | Ground Reference | Common ground with power supply |
-| *Do not connect* | **V+ (24V)** | Tile Power Supply | **WARNING**: Canvas operates at 24V! Do NOT connect directly to ESP32 3.3V/5V! |
+| **GND** | **GND** (Left pad) | Ground Reference | Common ground with power supply |
+| *Do not connect* | **+24V** (Middle pad) | Tile Power Supply | **WARNING**: Canvas operates at 24V! Do NOT connect directly to ESP32! |
+| **GPIO4** | **DATA** (Right pad) | 1 Mbaud Bidirectional Bus | Open-drain; actively driven while transmitting (`push_pull_tx`). A 1–2.2 kΩ pull-up from DATA to 3.3 V is recommended |
 
 > [!NOTE]
 > The internal ~45 kΩ pull-up alone gives rising edges too slow for 1 Mbaud: with pure open-drain,
@@ -43,7 +43,7 @@ Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)*
 > pull-up to 3.3 V further improves the panels' replies and is what the LeafBus reference build uses.
 
 > [!WARNING]
-> The Canvas power rail carries **24 V DC**. Only connect **DATA** and **GND** between the ESP32 and the tile linker. Power the ESP32 separately via USB (or via a step-down buck converter from the 24V rail).
+> The Canvas power rail carries **24 V DC** on the **middle pad**. Only connect **DATA (Right pad)** and **GND (Left pad)** between the ESP32 and the tile linker. Power the ESP32 separately via USB (or via a step-down buck converter from the 24V rail).
 
 ---
 
@@ -60,6 +60,11 @@ Custom ESP32 firmware and ESPHome component to control **Nanoleaf Canvas (NL29)*
 │       ├── nanoleaf_canvas.cpp   # Core UART driver, cluster parser & API handler
 │       └── nanoleaf_canvas.h
 ├── nanoleaf-canvas-chris.yaml    # ESPHome configuration file
+├── sniffer/                      # Network-enabled 1 Mbaud bus sniffer & panel emulator
+│   ├── nanoleaf-sniffer.yaml     # ESPHome sniffer configuration (OTA-enabled)
+│   ├── components/nanoleaf_sniffer/ # Sniffer component, web visualizer & REST API
+│   ├── scripts/sniff_capture.py  # Live CLI streaming and capture tool
+│   └── README.md                 # Sniffer wiring, OTA flashing & usage guide
 ├── CANVAS_PROTOCOL.md            # Reverse-engineered Canvas protocol documentation
 ├── PROTOCOL.md                   # LeafBus specification of the Nanoleaf Shapes bus
 ├── cptmeme-protocol-notes.md     # Cptmeme's additional Shapes bus observations
@@ -118,9 +123,9 @@ docker run --rm -v $(pwd):/config esphome/esphome compile /config/nanoleaf-canva
 
 Flash over serial or OTA:
 ```bash
-esphome upload --device 192.168.1.106 nanoleaf-canvas-chris.yaml
+esphome upload --device <device-ip> nanoleaf-canvas-chris.yaml
 # or
-docker run --rm --net=host -v $(pwd):/config esphome/esphome upload --device 192.168.1.106 /config/nanoleaf-canvas-chris.yaml
+docker run --rm --net=host -v $(pwd):/config ghcr.io/esphome/esphome:latest upload --device <device-ip> /config/nanoleaf-canvas-chris.yaml
 ```
 
 Check that the compile step succeeded before uploading; `upload` flashes whatever binary was last built.

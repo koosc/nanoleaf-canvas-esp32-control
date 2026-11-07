@@ -52,6 +52,47 @@ static void hsv2rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t &r, uint8_t &g, ui
   }
 }
 
+static void kelvin_to_rgbw(float kelvin, uint8_t &r, uint8_t &g, uint8_t &b, uint8_t &w) {
+  // Calibrated against reverse-engineered stock Nanoleaf Canvas (NL29) controller
+  static const struct {
+    float k;
+    uint8_t r, g, b, w;
+  } CALIB[] = {
+    {1200.0f, 255, 110, 0,   0},
+    {1500.0f, 255, 122, 0,   0},
+    {2000.0f, 255, 147, 0,  16},
+    {2500.0f, 255, 142, 0,  89},
+    {2700.0f, 255, 137, 0, 113},
+    {3000.0f, 255, 137, 0, 143},
+    {3500.0f, 255, 132, 0, 183},
+    {4000.0f, 255, 127, 0, 216},
+    {4500.0f, 255, 127, 0, 243},
+    {5000.0f, 221, 119, 0, 255},
+    {5500.0f, 143,  74, 0, 255},
+    {6000.0f,  78,  47, 0, 255},
+    {6500.0f,  23,  19, 0, 255},
+  };
+  constexpr size_t N = sizeof(CALIB) / sizeof(CALIB[0]);
+  if (kelvin <= CALIB[0].k) {
+    r = CALIB[0].r; g = CALIB[0].g; b = CALIB[0].b; w = CALIB[0].w;
+    return;
+  }
+  if (kelvin >= CALIB[N - 1].k) {
+    r = CALIB[N - 1].r; g = CALIB[N - 1].g; b = CALIB[N - 1].b; w = CALIB[N - 1].w;
+    return;
+  }
+  for (size_t i = 0; i < N - 1; i++) {
+    if (kelvin >= CALIB[i].k && kelvin <= CALIB[i + 1].k) {
+      float t = (kelvin - CALIB[i].k) / (CALIB[i + 1].k - CALIB[i].k);
+      r = (uint8_t) roundf(CALIB[i].r + t * (CALIB[i + 1].r - CALIB[i].r));
+      g = (uint8_t) roundf(CALIB[i].g + t * (CALIB[i + 1].g - CALIB[i].g));
+      b = (uint8_t) roundf(CALIB[i].b + t * (CALIB[i + 1].b - CALIB[i].b));
+      w = (uint8_t) roundf(CALIB[i].w + t * (CALIB[i + 1].w - CALIB[i].w));
+      return;
+    }
+  }
+}
+
 static std::string to_hex(const uint8_t *data, size_t len) {
   std::string out;
   out.reserve(len * 2);
@@ -101,7 +142,8 @@ class NanoleafWebHandler : public AsyncWebHandler {
     }
 
     std::function<std::string()> job;
-    int r = 0, g = 0, b = 0, bri = 0, id = 0;
+    int r = 0, g = 0, b = 0, w = 0, bri = 0, id = 0;
+    bool has_w = get_int_param(request, "w", 0, 255, w);
     bool has_rgb = get_int_param(request, "r", 0, 255, r) && get_int_param(request, "g", 0, 255, g) &&
                    get_int_param(request, "b", 0, 255, b);
     NanoleafCanvas *c = this->parent_;
@@ -118,11 +160,11 @@ class NanoleafWebHandler : public AsyncWebHandler {
     } else if (url == "/api/re-enumerate") {
       job = [c]() { return std::string(c->enumerate_cluster() ? "{\"status\":\"ok\"}" : "{\"status\":\"failed\"}"); };
     } else if (url == "/api/set") {
-      if (!has_rgb || !get_int_param(request, "id", 0, MAX_TILES - 1, id)) {
+      if ((!has_rgb && !has_w) || !get_int_param(request, "id", 0, MAX_TILES - 1, id)) {
         request->send(400, "application/json", "{\"error\":\"missing or invalid parameters\"}");
         return;
       }
-      job = [c, id, r, g, b]() {
+      job = [c, id, r, g, b, w]() {
         if ((size_t) id >= c->get_panel_count())
           return std::string("{\"error\":\"no such tile\"}");
         auto *ls = c->get_light_state();
@@ -142,29 +184,42 @@ class NanoleafWebHandler : public AsyncWebHandler {
           // Keep the per-tile colors instead of repainting the solid color.
           c->consume_color_repaint();
         }
-        c->set_tile_color(id, r, g, b);
+        c->set_tile_color(id, r, g, b, w);
         return std::string("{\"status\":\"ok\"}");
       };
     } else if (url == "/api/all") {
+      int k = 0;
+      bool has_k = get_int_param(request, "k", 1200, 6500, k) || get_int_param(request, "kelvin", 1200, 6500, k);
       bool has_bri = get_int_param(request, "bri", 0, 255, bri);
-      if (!has_rgb && !has_bri) {
+      if (!has_rgb && !has_w && !has_bri && !has_k) {
         request->send(400, "application/json", "{\"error\":\"missing or invalid parameters\"}");
         return;
       }
-      job = [c, has_rgb, has_bri, r, g, b, bri]() {
+      job = [c, has_rgb, has_w, has_bri, has_k, r, g, b, w, bri, k]() {
         auto *ls = c->get_light_state();
         if (ls == nullptr) {
-          if (has_rgb)
-            c->set_all_colors(r, g, b);
+          if (has_k) {
+            uint8_t kr, kg, kb, kw;
+            kelvin_to_rgbw((float) k, kr, kg, kb, kw);
+            c->set_all_colors(kr, kg, kb, kw);
+          } else if (has_rgb || has_w) {
+            c->set_all_colors(r, g, b, w);
+          }
           if (has_bri)
             c->set_brightness(bri);
           return std::string("{\"status\":\"ok\"}");
         }
         auto call = ls->make_call();
-        if (has_rgb && r == 0 && g == 0 && b == 0) {
-          call.set_state(false);
-        } else if (has_rgb) {
+        if (has_k) {
           call.set_effect((uint32_t) 0);
+          call.set_color_mode(light::ColorMode::COLOR_TEMPERATURE);
+          call.set_color_temperature(1000000.0f / k);
+          call.set_state(true);
+        } else if ((has_rgb || has_w) && r == 0 && g == 0 && b == 0 && w == 0) {
+          call.set_state(false);
+        } else if (has_rgb || has_w) {
+          call.set_effect((uint32_t) 0);
+          call.set_color_mode(light::ColorMode::RGB);
           call.set_rgb(r / 255.0f, g / 255.0f, b / 255.0f);
           call.set_state(true);
           // An identical color would otherwise not repaint tiles set individually.
@@ -503,12 +558,18 @@ void NanoleafCanvas::parse_layout_tree(const uint8_t *layout, size_t len) {
                        .r = this->def_r_,
                        .g = this->def_g_,
                        .b = this->def_b_,
-                       .status = 0};
+                       .w = this->def_w_,
+                       .status = 0,
+                       .sent_r = 0,
+                       .sent_g = 0,
+                       .sent_b = 0,
+                       .sent_w = 0};
     // Keep the color of a tile we already knew.
     if (my_id < prev_tiles.size()) {
       tile.r = prev_tiles[my_id].r;
       tile.g = prev_tiles[my_id].g;
       tile.b = prev_tiles[my_id].b;
+      tile.w = prev_tiles[my_id].w;
     }
     this->tiles_.push_back(tile);
 
@@ -600,15 +661,17 @@ void NanoleafCanvas::set_brightness(uint8_t bri) {
   }
 }
 
-void NanoleafCanvas::set_all_colors(uint8_t r, uint8_t g, uint8_t b) {
+void NanoleafCanvas::set_all_colors(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   this->def_r_ = r;
   this->def_g_ = g;
   this->def_b_ = b;
+  this->def_w_ = w;
   for (auto &t : this->tiles_) {
-    if (t.r != r || t.g != g || t.b != b) {
+    if (t.r != r || t.g != g || t.b != b || t.w != w) {
       t.r = r;
       t.g = g;
       t.b = b;
+      t.w = w;
       this->colors_dirty_ = true;
     }
   }
@@ -616,14 +679,15 @@ void NanoleafCanvas::set_all_colors(uint8_t r, uint8_t g, uint8_t b) {
     this->last_change_ms_ = millis();
 }
 
-void NanoleafCanvas::set_tile_color(size_t index, uint8_t r, uint8_t g, uint8_t b) {
+void NanoleafCanvas::set_tile_color(size_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   if (index >= this->tiles_.size())
     return;
   auto &t = this->tiles_[index];
-  if (t.r != r || t.g != g || t.b != b) {
+  if (t.r != r || t.g != g || t.b != b || t.w != w) {
     t.r = r;
     t.g = g;
     t.b = b;
+    t.w = w;
     this->colors_dirty_ = true;
     this->last_change_ms_ = millis();
   }
@@ -634,39 +698,41 @@ void NanoleafCanvas::send_brightness() {
   xact(frame, sizeof(frame), nullptr, 0, 0, 10);
 }
 
-// Canvas panels take color through FC 06 (global) and F8 <id> 06 (one panel);
-// the Shapes bulk push (E0) has no effect on them. Node ids are the panels'
-// depth-first positions in the layout string. The W byte must be 0: a frame
-// with W set is ignored.
+// Canvas panels take native color through FC 06 (global broadcast) and
+// F8 <id> 06 (one panel). The W byte drives the physical dedicated phosphor
+// cool-white LEDs.
 void NanoleafCanvas::send_colors(bool force) {
   if (this->tiles_.empty())
     return;
   const auto &first = this->tiles_[0];
   bool uniform = true;
   for (const auto &t : this->tiles_) {
-    if (t.r != first.r || t.g != first.g || t.b != first.b) {
+    if (t.r != first.r || t.g != first.g || t.b != first.b || t.w != first.w) {
       uniform = false;
       break;
     }
   }
   if (uniform) {
-    const uint8_t frame[] = {0xFC, 0x06, first.r, first.g, first.b, 0x00, this->transition_};
+    // FC 06 <R> <G> <B> <W> <Transition>
+    const uint8_t frame[] = {0xFC, 0x06, first.r, first.g, first.b, first.w, this->transition_};
     xact(frame, sizeof(frame), nullptr, 0, 0, 10);
     for (auto &t : this->tiles_) {
       t.sent_r = t.r;
       t.sent_g = t.g;
       t.sent_b = t.b;
+      t.sent_w = t.w;
     }
   } else {
     for (auto &t : this->tiles_) {
-      if (!force && this->sent_valid_ && t.sent_r == t.r && t.sent_g == t.g && t.sent_b == t.b)
+      if (!force && this->sent_valid_ && t.sent_r == t.r && t.sent_g == t.g && t.sent_b == t.b && t.sent_w == t.w)
         continue;
-      const uint8_t frame[] = {0xF8, (uint8_t) (t.id & 0xFF), (uint8_t) (t.id >> 8), 0x06, t.r, t.g, t.b, 0x00,
+      const uint8_t frame[] = {0xF8, (uint8_t) (t.id & 0xFF), (uint8_t) (t.id >> 8), 0x06, t.r, t.g, t.b, t.w,
                                this->transition_};
       xact(frame, sizeof(frame), nullptr, 0, 0, 10);
       t.sent_r = t.r;
       t.sent_g = t.g;
       t.sent_b = t.b;
+      t.sent_w = t.w;
     }
   }
   this->sent_valid_ = true;
@@ -790,7 +856,8 @@ std::string NanoleafCanvas::get_tiles_json() {
     if (i > 0)
       ss << ",";
     ss << "{\"id\":" << t.id << ",\"x\":" << t.x << ",\"y\":" << t.y << ",\"rot\":" << (int) t.rot
-       << ",\"r\":" << (int) t.r << ",\"g\":" << (int) t.g << ",\"b\":" << (int) t.b << "}";
+       << ",\"r\":" << (int) t.r << ",\"g\":" << (int) t.g << ",\"b\":" << (int) t.b
+       << ",\"w\":" << (int) t.w << "}";
   }
   ss << "]";
   return ss.str();
@@ -891,7 +958,9 @@ void NanoleafCanvasLight::setup_state(light::LightState *state) {
 
 light::LightTraits NanoleafCanvasLight::get_traits() {
   auto traits = light::LightTraits();
-  traits.set_supported_color_modes({light::ColorMode::RGB});
+  traits.set_supported_color_modes({light::ColorMode::RGB, light::ColorMode::COLOR_TEMPERATURE});
+  traits.set_min_mireds(153.8f);  // 6500K
+  traits.set_max_mireds(833.3f);  // 1200K
   return traits;
 }
 
@@ -899,29 +968,49 @@ void NanoleafCanvasLight::write_state(light::LightState *state) {
   const auto &v = state->current_values;
 
   // Brightness goes out once, through the panels' own brightness control (FC 04).
-  // The RGB chunk carries only the color at full scale, so dimming never
+  // The RGBW chunk carries only the color at full scale, so dimming never
   // quantizes the color channels (which shifted hue at low brightness).
   float bri = v.get_state() * v.get_brightness();
   uint8_t bri8 = (uint8_t) roundf(state->gamma_correct_lut(bri) * 255.0f);
   if (bri > 0.0f && bri8 == 0)
     bri8 = 1;
 
-  float cb = v.get_color_brightness();
-  uint8_t r = (uint8_t) roundf(state->gamma_correct_lut(v.get_red() * cb) * 255.0f);
-  uint8_t g = (uint8_t) roundf(state->gamma_correct_lut(v.get_green() * cb) * 255.0f);
-  uint8_t b = (uint8_t) roundf(state->gamma_correct_lut(v.get_blue() * cb) * 255.0f);
+  uint8_t r = 0, g = 0, b = 0, w = 0;
+
+  if (v.get_color_mode() == light::ColorMode::COLOR_TEMPERATURE) {
+    float kelvin = v.get_color_temperature_kelvin();
+    kelvin_to_rgbw(kelvin, r, g, b, w);
+  } else {
+    float cb = v.get_color_brightness();
+    float rf = state->gamma_correct_lut(v.get_red() * cb);
+    float gf = state->gamma_correct_lut(v.get_green() * cb);
+    float bf = state->gamma_correct_lut(v.get_blue() * cb);
+
+    // Desaturation white extraction: extract common white component to dedicated W LED
+    float min_c = std::min(rf, std::min(gf, bf));
+    float wf = min_c;
+    rf -= min_c;
+    gf -= min_c;
+    bf -= min_c;
+
+    r = (uint8_t) roundf(rf * 255.0f);
+    g = (uint8_t) roundf(gf * 255.0f);
+    b = (uint8_t) roundf(bf * 255.0f);
+    w = (uint8_t) roundf(wf * 255.0f);
+  }
 
   bool repaint = this->parent_->consume_color_repaint();
   bool effect_active = state->get_current_effect_index() != 0;
-  bool changed = !this->have_last_ || r != this->last_r_ || g != this->last_g_ || b != this->last_b_;
+  bool changed = !this->have_last_ || r != this->last_r_ || g != this->last_g_ || b != this->last_b_ || w != this->last_w_;
   // Only repaint on a color change, so per-tile colors survive dimming.
   if (!effect_active && (changed || repaint)) {
-    this->parent_->set_all_colors(r, g, b);
+    this->parent_->set_all_colors(r, g, b, w);
   }
   this->have_last_ = true;
   this->last_r_ = r;
   this->last_g_ = g;
   this->last_b_ = b;
+  this->last_w_ = w;
 
   this->parent_->set_brightness(bri8);
 }

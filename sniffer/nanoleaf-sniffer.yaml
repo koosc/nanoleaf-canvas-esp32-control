@@ -1,0 +1,40 @@
+esphome:
+  name: nanoleaf-sniffer
+  friendly_name: Nanoleaf Sniffer
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+wifi:
+  ssid: "YourSSID"
+  password: "YourPassword"
+  ap:
+    ssid: "Nanoleaf-Sniffer-Fallback"
+
+captive_portal:
+
+logger:
+  hardware_uart: UART0
+  level: INFO
+
+api:
+
+ota:
+  - platform: esphome
+  - platform: web_server
+
+web_server:
+  port: 80
+
+nanoleaf_sniffer:
+  id: sniffer_hub
+  data_pin: 4
+  filter_polls: true
+  emulator_mode: false
